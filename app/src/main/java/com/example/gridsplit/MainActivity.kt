@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -87,7 +86,6 @@ object ImageRepo {
         "jpg", "jpeg", "png", "webp", "bmp", "gif", "heic", "heif", "avif"
     )
 
-    /** 递归列出文件夹内所有图片，按文件名排序 */
     fun listImages(context: Context, treeUri: Uri): List<DocumentFile> {
         val root = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
         val out = ArrayList<DocumentFile>()
@@ -111,7 +109,6 @@ object ImageRepo {
     private fun isImage(name: String): Boolean =
         name.substringAfterLast('.', "").lowercase() in IMAGE_EXT
 
-    /** 加载预览用缩略图 */
     fun loadPreview(context: Context, uri: Uri, maxSize: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         try {
@@ -136,10 +133,6 @@ object ImageRepo {
         }
     }
 
-    /**
-     * 按 rows × cols 切割图片并写入输出文件夹。
-     * @return 成功写出的块数
-     */
     fun splitAndSave(
         context: Context,
         srcUri: Uri,
@@ -175,7 +168,6 @@ object ImageRepo {
                     val tile = Bitmap.createBitmap(src, x0, y0, tw, th)
                     try {
                         val name = "${base}_r${r + 1}c${c + 1}.png"
-                        // 同名文件先删除，避免 provider 自动追加 (1)
                         outRoot.findFile(name)?.delete()
                         val df = outRoot.createFile("image/png", name)
                             ?: throw IllegalStateException("无法创建文件 $name")
@@ -292,7 +284,6 @@ fun GridSplitScreen() {
         }
     }
 
-    // 扫描输入文件夹
     LaunchedEffect(inputUri) {
         val uri = inputUri
         if (uri == null) {
@@ -312,7 +303,6 @@ fun GridSplitScreen() {
         status = if (list.isEmpty()) "输入文件夹里没有找到图片" else "共 ${list.size} 张图片"
     }
 
-    // 加载当前图片预览
     val currentFile = files.getOrNull(index)
     LaunchedEffect(currentFile?.uri) {
         preview = null
@@ -326,6 +316,36 @@ fun GridSplitScreen() {
         }
     }
 
+    /** 保存当前图片并返回是否成功 */
+    suspend fun saveCurrent(): Boolean {
+        val f = currentFile ?: run {
+            status = "没有可处理的图片"
+            return false
+        }
+        val out = outputUri ?: run {
+            status = "请先选择输出文件夹"
+            return false
+        }
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                ImageRepo.splitAndSave(context, f.uri, f.name ?: "image", out, rows, cols)
+            }.fold(
+                onSuccess = { n ->
+                    withContext(Dispatchers.Main) {
+                        status = "已保存 $n 块"
+                    }
+                    true
+                },
+                onFailure = { e ->
+                    withContext(Dispatchers.Main) {
+                        status = "处理失败：${e.message ?: e.javaClass.simpleName}"
+                    }
+                    false
+                }
+            )
+        }
+    }
+
     Scaffold(
         topBar = { TopAppBar(title = { Text("网格分割") }) }
     ) { inner ->
@@ -335,20 +355,107 @@ fun GridSplitScreen() {
                 .fillMaxSize()
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
-            FolderRow(
-                label = "输入文件夹",
-                uri = inputUri,
-                onPick = { inputPicker.launch(null) }
-            )
-            Spacer(Modifier.height(6.dp))
-            FolderRow(
-                label = "输出文件夹",
-                uri = outputUri,
-                onPick = { outputPicker.launch(null) }
+            // ========== 第一栏：输入 / 输出 / 保存 ==========
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                OutlinedButton(
+                    onClick = { inputPicker.launch(null) },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 4.dp, vertical = 8.dp
+                    )
+                ) {
+                    Text(
+                        text = "输入",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = { outputPicker.launch(null) },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 4.dp, vertical = 8.dp
+                    )
+                ) {
+                    Text(
+                        text = "输出",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Button(
+                    onClick = {
+                        if (files.isEmpty()) {
+                            status = "没有可处理的图片"
+                            return@Button
+                        }
+                        if (outputUri == null) {
+                            status = "请先选择输出文件夹"
+                            return@Button
+                        }
+                        scope.launch {
+                            busy = true
+                            var successCount = 0
+                            var failCount = 0
+                            var totalTiles = 0
+                            for ((i, f) in files.withIndex()) {
+                                status = "批量处理中 ${i + 1}/${files.size}：${f.name}"
+                                val result = withContext(Dispatchers.IO) {
+                                    runCatching {
+                                        ImageRepo.splitAndSave(
+                                            context, f.uri, f.name ?: "image", outputUri!!, rows, cols
+                                        )
+                                    }
+                                }
+                                result.onSuccess { n ->
+                                    successCount++
+                                    totalTiles += n
+                                }.onFailure {
+                                    failCount++
+                                }
+                            }
+                            busy = false
+                            status = "批量完成：成功 $successCount 张，失败 $failCount 张，共保存 $totalTiles 块"
+                        }
+                    },
+                    enabled = !busy && files.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 4.dp, vertical = 8.dp
+                    )
+                ) {
+                    Text(
+                        text = if (busy) "处理中" else "保存",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            // 显示当前已选文件夹名（小字）
+            Text(
+                text = buildString {
+                    append("输入：")
+                    append(inputUri?.lastPathSegment?.substringAfterLast(':') ?: "未选择")
+                    append("　输出：")
+                    append(outputUri?.lastPathSegment?.substringAfterLast(':') ?: "未选择")
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
             )
 
             Spacer(Modifier.height(8.dp))
 
+            // ========== 第二栏：行数 / 列数 ==========
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = rowsText,
@@ -370,6 +477,7 @@ fun GridSplitScreen() {
 
             Spacer(Modifier.height(8.dp))
 
+            // ========== 中间：预览区 ==========
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -394,6 +502,7 @@ fun GridSplitScreen() {
 
             Spacer(Modifier.height(8.dp))
 
+            // ========== 状态信息 ==========
             Text(
                 text = buildString {
                     append(if (files.isEmpty()) "0 / 0" else "${index + 1} / ${files.size}")
@@ -413,6 +522,7 @@ fun GridSplitScreen() {
 
             Spacer(Modifier.height(8.dp))
 
+            // ========== 底部：上一张 / 跳过 / 下一张 ==========
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()
@@ -440,68 +550,26 @@ fun GridSplitScreen() {
 
                 Button(
                     onClick = {
-                        val f = files.getOrNull(index)
-                        val out = outputUri
-                        if (f == null) {
-                            status = "没有可处理的图片"
-                            return@Button
-                        }
-                        if (out == null) {
-                            status = "请先选择输出文件夹"
-                            return@Button
-                        }
                         scope.launch {
                             busy = true
-                            status = "正在处理 ${f.name}…"
-                            val result = withContext(Dispatchers.IO) {
-                                runCatching {
-                                    ImageRepo.splitAndSave(
-                                        context, f.uri, f.name ?: "image", out, rows, cols
-                                    )
-                                }
-                            }
+                            val ok = saveCurrent()
                             busy = false
-                            result.onSuccess { n ->
+                            if (ok) {
                                 if (index < files.size - 1) {
                                     index++
-                                    status = "已保存 $n 块，进入下一张"
+                                    status = "已保存当前页，进入下一张"
                                 } else {
-                                    status = "全部完成，最后一张保存了 $n 块"
+                                    status = "已保存最后一张"
                                 }
-                            }.onFailure { e ->
-                                status = "处理失败：${e.message ?: e.javaClass.simpleName}"
                             }
                         }
                     },
                     enabled = !busy && files.isNotEmpty(),
                     modifier = Modifier.weight(1.4f)
-                ) { Text(if (busy) "处理中…" else "下一张/保存") }
+                ) { Text(if (busy) "处理中…" else "下一张") }
             }
 
             Spacer(Modifier.height(8.dp))
-        }
-    }
-}
-
-@Composable
-private fun FolderRow(label: String, uri: Uri?, onPick: () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(label, style = MaterialTheme.typography.labelMedium)
-                Text(
-                    text = uri?.lastPathSegment?.substringAfterLast(':') ?: "未选择",
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            OutlinedButton(onClick = onPick) { Text("选择") }
         }
     }
 }
