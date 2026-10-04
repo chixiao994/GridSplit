@@ -16,6 +16,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -133,13 +134,20 @@ object ImageRepo {
         }
     }
 
+    /**
+     * 按 rows × cols 切割图片并写入输出文件夹。
+     * hOverlap / vOverlap 为相邻块在水平/垂直方向上的重叠像素数（左右各扩一半）。
+     * @return 成功写出的块数
+     */
     fun splitAndSave(
         context: Context,
         srcUri: Uri,
         srcName: String,
         outTreeUri: Uri,
         rows: Int,
-        cols: Int
+        cols: Int,
+        hOverlap: Int,
+        vOverlap: Int
     ): Int {
         val outRoot = DocumentFile.fromTreeUri(context, outTreeUri)
             ?: throw IllegalStateException("无法访问输出文件夹")
@@ -153,15 +161,22 @@ object ImageRepo {
             val h = src.height
             if (w <= 0 || h <= 0) throw IllegalStateException("图片尺寸无效")
 
+            val hHalf = hOverlap / 2
+            val vHalf = vOverlap / 2
+
             for (r in 0 until rows) {
-                val y0 = r * h / rows
-                val y1 = (r + 1) * h / rows
+                val baseY0 = r * h / rows
+                val baseY1 = (r + 1) * h / rows
+                val y0 = (baseY0 - vHalf).coerceAtLeast(0)
+                val y1 = (baseY1 + vHalf).coerceAtMost(h)
                 val th = y1 - y0
                 if (th <= 0) continue
 
                 for (c in 0 until cols) {
-                    val x0 = c * w / cols
-                    val x1 = (c + 1) * w / cols
+                    val baseX0 = c * w / cols
+                    val baseX1 = (c + 1) * w / cols
+                    val x0 = (baseX0 - hHalf).coerceAtLeast(0)
+                    val x1 = (baseX1 + hHalf).coerceAtMost(w)
                     val tw = x1 - x0
                     if (tw <= 0) continue
 
@@ -242,16 +257,20 @@ fun GridSplitScreen() {
 
     var inputUri by remember { mutableStateOf<Uri?>(null) }
     var outputUri by remember { mutableStateOf<Uri?>(null) }
-    var rowsText by remember { mutableStateOf("2") }
-    var colsText by remember { mutableStateOf("2") }
+    var rowsText by remember { mutableStateOf("20") }
+    var colsText by remember { mutableStateOf("12") }
+    var hOverlapText by remember { mutableStateOf("0") }
+    var vOverlapText by remember { mutableStateOf("0") }
     var files by remember { mutableStateOf<List<DocumentFile>>(emptyList()) }
     var index by remember { mutableIntStateOf(0) }
     var status by remember { mutableStateOf("请先选择输入文件夹") }
     var busy by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<ImageBitmap?>(null) }
 
-    val rows = (rowsText.toIntOrNull() ?: 2).coerceIn(1, 50)
-    val cols = (colsText.toIntOrNull() ?: 2).coerceIn(1, 50)
+    val rows = (rowsText.toIntOrNull() ?: 20).coerceIn(1, 50)
+    val cols = (colsText.toIntOrNull() ?: 12).coerceIn(1, 50)
+    val hOverlap = (hOverlapText.toIntOrNull() ?: 0).coerceAtLeast(0)
+    val vOverlap = (vOverlapText.toIntOrNull() ?: 0).coerceAtLeast(0)
 
     val inputPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -328,7 +347,10 @@ fun GridSplitScreen() {
         }
         return withContext(Dispatchers.IO) {
             runCatching {
-                ImageRepo.splitAndSave(context, f.uri, f.name ?: "image", out, rows, cols)
+                ImageRepo.splitAndSave(
+                    context, f.uri, f.name ?: "image", out,
+                    rows, cols, hOverlap, vOverlap
+                )
             }.fold(
                 onSuccess = { n ->
                     withContext(Dispatchers.Main) {
@@ -364,29 +386,17 @@ fun GridSplitScreen() {
                 OutlinedButton(
                     onClick = { inputPicker.launch(null) },
                     modifier = Modifier.weight(1f),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                        horizontal = 4.dp, vertical = 8.dp
-                    )
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
                 ) {
-                    Text(
-                        text = "输入",
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Text("输入", maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
 
                 OutlinedButton(
                     onClick = { outputPicker.launch(null) },
                     modifier = Modifier.weight(1f),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                        horizontal = 4.dp, vertical = 8.dp
-                    )
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
                 ) {
-                    Text(
-                        text = "输出",
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Text("输出", maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
 
                 Button(
@@ -409,7 +419,8 @@ fun GridSplitScreen() {
                                 val result = withContext(Dispatchers.IO) {
                                     runCatching {
                                         ImageRepo.splitAndSave(
-                                            context, f.uri, f.name ?: "image", outputUri!!, rows, cols
+                                            context, f.uri, f.name ?: "image", outputUri!!,
+                                            rows, cols, hOverlap, vOverlap
                                         )
                                     }
                                 }
@@ -426,9 +437,7 @@ fun GridSplitScreen() {
                     },
                     enabled = !busy && files.isNotEmpty(),
                     modifier = Modifier.weight(1f),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                        horizontal = 4.dp, vertical = 8.dp
-                    )
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
                 ) {
                     Text(
                         text = if (busy) "处理中" else "保存",
@@ -438,29 +447,14 @@ fun GridSplitScreen() {
                 }
             }
 
-            // 显示当前已选文件夹名（小字）
-            Text(
-                text = buildString {
-                    append("输入：")
-                    append(inputUri?.lastPathSegment?.substringAfterLast(':') ?: "未选择")
-                    append("　输出：")
-                    append(outputUri?.lastPathSegment?.substringAfterLast(':') ?: "未选择")
-                },
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-
             Spacer(Modifier.height(8.dp))
 
-            // ========== 第二栏：行数 / 列数 ==========
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // ========== 第二栏：行数 / 列数 / 左右重叠 / 上下重叠 ==========
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedTextField(
                     value = rowsText,
                     onValueChange = { s -> rowsText = s.filter { it.isDigit() }.take(3) },
-                    label = { Text("行数") },
+                    label = { Text("行数", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f)
@@ -468,7 +462,23 @@ fun GridSplitScreen() {
                 OutlinedTextField(
                     value = colsText,
                     onValueChange = { s -> colsText = s.filter { it.isDigit() }.take(3) },
-                    label = { Text("列数") },
+                    label = { Text("列数", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedTextField(
+                    value = hOverlapText,
+                    onValueChange = { s -> hOverlapText = s.filter { it.isDigit() }.take(4) },
+                    label = { Text("左右重叠", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedTextField(
+                    value = vOverlapText,
+                    onValueChange = { s -> vOverlapText = s.filter { it.isDigit() }.take(4) },
+                    label = { Text("上下重叠", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f)
