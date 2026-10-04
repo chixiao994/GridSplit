@@ -137,6 +137,13 @@ object ImageRepo {
     /**
      * 按 rows × cols 切割图片并写入输出文件夹。
      * hOverlap / vOverlap 为相邻块在水平/垂直方向上的重叠像素数（左右各扩一半）。
+     *
+     * 输出为 PNG（无损，100% 质量），适合制作字库等对画质敏感的场景。
+     *
+     * 性能要点：
+     *  - 进入循环前一次性列举输出目录，缓存到 map，避免每块都调用 findFile（O(n²) → O(n)）
+     *  - 用 openOutputStream(uri, "wt") 覆盖写入，不再先 delete 再 create（省去两次 IPC）
+     *
      * @return 成功写出的块数
      */
     fun splitAndSave(
@@ -154,6 +161,14 @@ object ImageRepo {
         val src = loadFullBitmap(context, srcUri)
             ?: throw IllegalStateException("无法解码图片")
 
+        // 一次性列举输出目录，缓存文件名 → DocumentFile
+        val existing: MutableMap<String, DocumentFile> = try {
+            outRoot.listFiles().associateByTo(HashMap()) { it.name.orEmpty() }
+        } catch (e: Exception) {
+            HashMap()
+        }
+
+        val resolver = context.contentResolver
         val base = srcName.substringBeforeLast('.', srcName)
         var count = 0
         try {
@@ -183,11 +198,14 @@ object ImageRepo {
                     val tile = Bitmap.createBitmap(src, x0, y0, tw, th)
                     try {
                         val name = "${base}_r${r + 1}c${c + 1}.png"
-                        outRoot.findFile(name)?.delete()
-                        val df = outRoot.createFile("image/png", name)
+                        val target = existing[name]
+                            ?: outRoot.createFile("image/png", name)?.also {
+                                existing[name] = it
+                            }
                             ?: throw IllegalStateException("无法创建文件 $name")
 
-                        val ok = context.contentResolver.openOutputStream(df.uri)?.use { os ->
+                        // "wt" = 覆盖写 + 截断，避免先删后建
+                        val ok = resolver.openOutputStream(target.uri, "wt")?.use { os ->
                             tile.compress(Bitmap.CompressFormat.PNG, 100, os)
                         } ?: false
 
